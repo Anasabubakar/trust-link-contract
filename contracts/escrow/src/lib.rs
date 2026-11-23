@@ -26,8 +26,9 @@ pub use crate::errors::ContractError;
 pub use crate::events::*;
 pub use crate::types::{
     ContractConfig, ContractStats, DataKey, DisputeData, DisputeStatus, Escrow as EscrowData,
-    EscrowInput, EscrowState, EvidenceEntry, ExpirySchedule, FeeConfig, GlobalConfig, Payee, PublicContractConfig,
-    ResolutionType, ResolverSet, ResolverVote, TimelockOperation, TimelockProposal, TokenEntry,
+    EscrowInput, EscrowState, ExpirySchedule, FeeConfig, GlobalConfig, Payee, PublicContractConfig,
+    ResolutionType, ResolverSet, ResolverVote, TimelockOperation, TimelockProposal,
+    TokenBalanceInfo, TokenEntry,
 };
 
 /// A single call descriptor used by the `multicall` batching function.
