@@ -93,7 +93,15 @@ pub enum DataKey {
     /// lets buyers reclaim custodied funds without going through the standard
     /// state machine. Absent means false.
     RecoveryMode,
-    /// Configurable 24-hour timelock delay for privileged admin operations.
+    /// Timelock delay (seconds) applied to privileged admin operations.
+    /// Absent means `ADMIN_TIMELOCK_DELAY_SECONDS` (24 hours); valid values
+    /// lie in `MIN_TIMELOCK_DELAY_SECONDS..=MAX_TIMELOCK_DELAY_SECONDS`.
+    ///
+    /// Changed only through the two-step `queue_set_timelock_delay` ->
+    /// `execute_set_timelock_delay` flow, and that change waits
+    /// `max(current_delay, new_delay)` (#1238): shortening the delay costs the
+    /// full current delay, lengthening it costs the new one. Proposals queued
+    /// before the change keep the `ready_at` they were queued with.
     AdminTimelockDelay,
     /// Every admin-tunable fee, limit and toggle, packed into one
     /// [`GlobalConfig`] entry so hot paths pay for a single instance-storage
