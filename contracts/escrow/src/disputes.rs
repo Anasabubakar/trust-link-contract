@@ -135,11 +135,16 @@ impl Escrow {
             resolver_fee: 0,
             fees_charged: false,
             compensated_resolvers: Vec::new(&env),
+            resolution_reason: None,
+            resolution_memo: Bytes::new(&env),
         };
 
         save_escrow(&env, escrow_id, &escrow, Some(&prev_state));
         save_dispute(&env, escrow_id, &dispute_data);
         crate::internal::clear_delivery_proposal(&env, escrow_id);
+        // Counts unique disputed escrows: bumped here exactly once per escrow
+        // (an escrow can only be disputed from a non-disputed state). Appeals
+        // (`appeal_dispute`) do not re-increment it; see `COUNTER_KIND_APPEALS`.
         increment_sharded_counter(&env, COUNTER_KIND_DISPUTED, escrow_id)?;
         emit_dispute_raised(
             &env,
@@ -245,7 +250,41 @@ impl Escrow {
         resolution: ResolutionType,
     ) -> Result<(), ContractError> {
         caller.require_auth();
-        crate::resolve_or_vote_internal(&env, caller, escrow_id, resolution)
+        crate::resolve_or_vote_internal(
+            &env,
+            caller,
+            escrow_id,
+            resolution,
+            None,
+            Bytes::new(&env),
+        )
+    }
+
+    /// Like `resolve_dispute`, but also records *why* the resolver decided as
+    /// they did: an optional standardized `reason` symbol (e.g.
+    /// `NON_DELIVERY`, `DAMAGED`, `MUTUAL`) and a free-form `memo` (pass an
+    /// empty `Bytes` for none). They are stored on `DisputeData`
+    /// (`resolution_reason` / `resolution_memo`, readable via `get_dispute`)
+    /// when this call moves the escrow to `PendingFinalization`, and the
+    /// reason is included in the `DisputePendingFinalization` event. For a
+    /// multi-resolver set that is the vote that reaches the threshold. They
+    /// are cleared again if the resolution is appealed.
+    ///
+    /// Reverts with `InputTooLong` if `memo` exceeds `MAX_DESCRIPTION_LEN`
+    /// bytes, plus every error `resolve_dispute` can return.
+    pub fn resolve_dispute_with_reason(
+        env: Env,
+        caller: Address,
+        escrow_id: u64,
+        resolution: ResolutionType,
+        reason: Option<Symbol>,
+        memo: Bytes,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        if memo.len() > MAX_DESCRIPTION_LEN {
+            return Err(ContractError::InputTooLong);
+        }
+        crate::resolve_or_vote_internal(&env, caller, escrow_id, resolution, reason, memo)
     }
 
     /// Cast or change a vote on a disputed escrow.
@@ -257,7 +296,14 @@ impl Escrow {
         resolution: ResolutionType,
     ) -> Result<(), ContractError> {
         caller.require_auth();
-        crate::resolve_or_vote_internal(&env, caller, escrow_id, resolution)
+        crate::resolve_or_vote_internal(
+            &env,
+            caller,
+            escrow_id,
+            resolution,
+            None,
+            Bytes::new(&env),
+        )
     }
 
     /// Get the resolver votes for a disputed escrow (for multi-resolver voting tracking)
@@ -309,8 +355,10 @@ impl Escrow {
         }
 
         let prev_state = escrow.state.clone();
+        // For `Split` the event's `recipient` is the primary payee; the buyer
+        // is paid its share separately below (see `buyer_split`).
         let recipient = match resolution {
-            ResolutionType::Release => escrow
+            ResolutionType::Release | ResolutionType::Split(_) => escrow
                 .payees
                 .get(0)
                 .ok_or(ContractError::IndexOutOfBounds)?
@@ -320,6 +368,16 @@ impl Escrow {
                 .buyer
                 .clone()
                 .ok_or(ContractError::EscrowHasNoBuyer)?,
+        };
+        let buyer_split = if matches!(resolution, ResolutionType::Split(_)) {
+            Some(
+                escrow
+                    .buyer
+                    .clone()
+                    .ok_or(ContractError::EscrowHasNoBuyer)?,
+            )
+        } else {
+            None
         };
 
         let fee_collector: Address = crate::storage::read_global_config(&env)
@@ -376,7 +434,7 @@ impl Escrow {
 
         // ── EFFECTS (state mutations) — must precede all external calls (CEI) ──
         let new_state = match resolution {
-            ResolutionType::Release => EscrowState::Completed,
+            ResolutionType::Release | ResolutionType::Split(_) => EscrowState::Completed,
             ResolutionType::Refund => EscrowState::Refunded,
         };
         escrow.state = new_state.clone();
@@ -386,7 +444,7 @@ impl Escrow {
         save_dispute(&env, escrow_id, &dispute_data);
 
         match resolution {
-            ResolutionType::Release => {
+            ResolutionType::Release | ResolutionType::Split(_) => {
                 record_escrow_completed(&env, escrow_id)?;
             }
             ResolutionType::Refund => {
@@ -398,9 +456,29 @@ impl Escrow {
         if let Some(ref treasury_addr) = treasury {
             payout(&env, &escrow.token, treasury_addr, platform_fee);
         }
-        payout(&env, &escrow.token, &recipient, payout_amount);
-        payout(&env, &escrow.token, &fee_collector, protocol_fee);
-        payout_basket_tokens(&env, escrow_id, &recipient, Some(escrow.fee_bps))?;
+        match (&resolution, &buyer_split) {
+            (ResolutionType::Split(split_bps), Some(buyer)) => {
+                // payee_net + buyer_net == payout_amount: nothing is stranded.
+                let (payee_net, buyer_net) =
+                    crate::helpers::payout::split_net(payout_amount, *split_bps)?;
+                payout(&env, &escrow.token, &recipient, payee_net);
+                payout(&env, &escrow.token, buyer, buyer_net);
+                payout(&env, &escrow.token, &fee_collector, protocol_fee);
+                crate::internal::payout_basket_tokens_split(
+                    &env,
+                    escrow_id,
+                    &recipient,
+                    buyer,
+                    *split_bps,
+                    escrow.fee_bps,
+                )?;
+            }
+            _ => {
+                payout(&env, &escrow.token, &recipient, payout_amount);
+                payout(&env, &escrow.token, &fee_collector, protocol_fee);
+                payout_basket_tokens(&env, escrow_id, &recipient, Some(escrow.fee_bps))?;
+            }
+        }
 
         emit_dispute_resolved(
             &env,
@@ -544,6 +622,11 @@ impl Escrow {
         // ── EFFECTS (state mutations) — must precede all external calls (CEI) ──
         save_escrow(&env, escrow_id, &escrow, Some(&prev_state));
         save_dispute(&env, escrow_id, &updated_dispute);
+        // Accounting invariant: an appeal re-enters `Disputed` but is NOT a new
+        // disputed escrow, so `COUNTER_KIND_DISPUTED` (unique disputed escrows,
+        // bumped once in `raise_dispute`) is intentionally left untouched.
+        // Appeal volume is tracked in its own counter instead.
+        increment_sharded_counter(&env, COUNTER_KIND_APPEALS, escrow_id)?;
 
         // ── INTERACTIONS (external token transfers) ──
         // The state transition above is already persisted, so a re-entrant
@@ -665,6 +748,11 @@ impl Escrow {
             escrow_id,
             timeout_resolver,
             ResolutionType::Refund,
+            votes,
+            false,
+            None,
+            Bytes::new(&env),
+        )
             buyer,
             escrow.amount,
             0,
@@ -729,7 +817,17 @@ impl Escrow {
 
         let resolution = tally_votes_majority(&votes);
         let actor = voter_for(&votes, &resolution).ok_or(ContractError::NoResolverVotes)?;
-        execute_resolution_transition(&env, escrow_id, escrow, actor, resolution, votes, true)
+        execute_resolution_transition(
+            &env,
+            escrow_id,
+            escrow,
+            actor,
+            resolution,
+            votes,
+            true,
+            None,
+            Bytes::new(&env),
+        )
     }
 
     /// Admin override to cancel an escrow in `PendingFinalization`.
@@ -764,7 +862,7 @@ impl Escrow {
         if let Ok(mut dispute) = load_dispute(&env, escrow_id) {
             dispute.status = DisputeStatus::Resolved;
             dispute.resolved_by = Some(caller.clone());
-            dispute.resolution = ResolutionType::Refund as u32;
+            dispute.set_resolution(ResolutionType::Refund);
             dispute.resolved_at = env.ledger().timestamp();
             save_dispute(&env, escrow_id, &dispute);
         }
