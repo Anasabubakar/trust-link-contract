@@ -13,6 +13,19 @@ struct GasSample {
     mem_bytes: u64,
 }
 
+/// Soroban meters each top-level invocation separately, so reset the tracker
+/// before the call and read the accumulated cost afterwards. These helpers
+/// keep the `take_budget_snapshot` / `diff` call pattern used by every profile
+/// below while using the SDK 26 `cost_estimate()` budget API.
+fn take_budget_snapshot(env: &Env) -> GasSample {
+    env.cost_estimate().budget().reset_tracker();
+    GasSample {
+        cpu_insns: 0,
+        mem_bytes: 0,
+    }
+}
+
+fn diff(env: &Env, _before: &GasSample) -> GasSample {
 // Soroban resets the budget for each top-level invocation.
 fn reset_gas_meter(env: &Env) {
     env.cost_estimate().budget().reset_tracker();
@@ -233,6 +246,53 @@ fn gas_profile_create_basket_escrow() {
     );
     let sample = read_gas_meter(&env);
     print_gas("create_basket_escrow(3 tokens)", &sample);
+}
+
+/// Issue #1232: basket reads/writes go through the capacity-bounded XDR value
+/// instead of a bare vector. Assert the metered cost of a write
+/// (`create_basket_escrow`) and a read (`get_basket_tokens`) stays bounded —
+/// the wrapper must not add per-entry host calls or an unbounded decode path.
+#[test]
+fn gas_profile_bounded_basket_read_write() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_contract_id, client, _admin, _fc) = setup_contract(&env);
+
+    let seller = Address::generate(&env);
+    let resolver = Address::generate(&env);
+    let mut tokens = Vec::new(&env);
+    for _ in 0..3 {
+        tokens.push_back(register_token(&env));
+    }
+    let amounts = Vec::from_array(&env, [1_000_000_i128, 500_000, 250_000]);
+
+    let before_write = take_budget_snapshot(&env);
+    let id = client.create_basket_escrow(
+        &seller,
+        &None::<Address>,
+        &resolver,
+        &tokens,
+        &amounts,
+        &100_u32,
+        &3_600_u64,
+        &None::<SorobanString>,
+        &None::<u64>,
+        &0_u64,
+    );
+    let write = diff(&env, &before_write);
+    print_gas("bounded_basket_write(3 tokens)", &write);
+
+    let before_read = take_budget_snapshot(&env);
+    let basket = client.get_basket_tokens(&id).expect("basket exists");
+    let read = diff(&env, &before_read);
+    print_gas("bounded_basket_read(3 tokens)", &read);
+
+    assert_eq!(basket.len(), 3);
+    assert!(write.cpu_insns > 0 && read.cpu_insns > 0);
+    const WRITE_CPU_CEILING: u64 = 2_000_000;
+    const READ_CPU_CEILING: u64 = 500_000;
+    assert!(write.cpu_insns < WRITE_CPU_CEILING);
+    assert!(read.cpu_insns < READ_CPU_CEILING);
 }
 
 #[test]

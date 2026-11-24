@@ -472,13 +472,17 @@ fn fund_basket_escrow_rejects_empty_basket_with_basket_token_mismatch() {
         &0_u64,
     );
 
-    // Simulate a corrupt/empty basket: clear the stored token entries directly.
+    // Simulate a corrupt/empty basket: clear the bounded storage value directly.
     fx.env.as_contract(&fx.contract_id, || {
-        let empty: Vec<crate::TokenEntry> = Vec::new(&fx.env);
+        let empty = crate::BoundedBasket::new(Vec::new(&fx.env));
         fx.env
             .storage()
             .persistent()
-            .set(&crate::DataKey::BasketTokens(escrow_id), &empty);
+            .set(&crate::DataKey::BasketTokensV2(escrow_id), &empty);
+        fx.env
+            .storage()
+            .persistent()
+            .remove(&crate::DataKey::BasketTokens(escrow_id));
     });
 
     let result = client.try_fund_basket_escrow(&escrow_id, &fx.buyer);
