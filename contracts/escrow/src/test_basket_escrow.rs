@@ -1641,6 +1641,7 @@ fn fund_basket_escrow_rejects_fee_on_transfer_token_and_rolls_back() {
     assert_eq!(mclient.balance(&fx.buyer), malicious_amount);
     assert_eq!(mclient.balance(&fx.contract_id), 0);
     assert_eq!(client.get_escrow(&escrow_id).state, EscrowState::Pending);
+    assert_eq!(client.get_basket_tokens(&escrow_id).unwrap().len(), 2);
 }
 
 // ── Issue #1220 – token allowlist gating for every basket token ─────────────
@@ -1841,6 +1842,7 @@ fn refund_paths_return_gross_basket_tokens_without_fees() {
         &None::<u64>,
         &0_u64,
     );
+
     a.admin.mint(&fx.buyer, &a_amount);
     b.admin.mint(&fx.buyer, &b_amount);
     client.fund_basket_escrow(&mutual_id, &fx.buyer);
