@@ -441,6 +441,7 @@ pub(crate) fn validate_payees(env: &Env, payees: &BoundedPayees) -> Result<(), C
         return Err(ContractError::InvalidAddress);
     }
 
+    let zero = crate::zero_address(env);
     let mut total_bps: u32 = 0;
     for i in 0..payees.inner.len() {
         let payee = payees
@@ -449,13 +450,21 @@ pub(crate) fn validate_payees(env: &Env, payees: &BoundedPayees) -> Result<(), C
             .ok_or(ContractError::PayeeIndexOutOfBounds)?;
         let bps = payee.bps;
 
-        // Check for overflow
-        total_bps = total_bps
+        // Reject zero-share payees so every payee strictly increases the cumulative sum.
+        if bps == 0 {
+            return Err(ContractError::PayeeBpsMismatch);
+        }
+
+        // Enforce strict monotonicity and prevent arithmetic wrap/overflow.
+        let next_total = total_bps
             .checked_add(bps)
             .ok_or(ContractError::ArithmeticError)?;
+        if next_total <= total_bps || next_total > BASIS_POINTS {
+            return Err(ContractError::PayeeBpsMismatch);
+        }
+        total_bps = next_total;
 
         // Validate each payee address is not zero
-        let zero = crate::zero_address(env);
         if payee.address == zero {
             return Err(ContractError::InvalidAddress);
         }
@@ -487,6 +496,26 @@ pub(crate) fn validate_combined_fees(
         .checked_add(arbitration_fee_bps)
         .ok_or(ContractError::ArithmeticError)?;
     if combined > MAX_COMBINED_FEE_BPS {
+        return Err(ContractError::FeeExceedsMax);
+    }
+    Ok(())
+}
+
+/// Validates that the cumulative sum of all concurrent fee rates
+/// (`protocol_fee_bps + platform_fee_bps + arbitration_fee_bps + resolver_fee_bps`)
+/// does not exceed `MAX_TOTAL_FEE_BPS` (2,500 = 25%).
+pub(crate) fn validate_total_fee_bps(
+    protocol_fee_bps: u32,
+    platform_fee_bps: u32,
+    arbitration_fee_bps: u32,
+    resolver_fee_bps: u32,
+) -> Result<(), ContractError> {
+    let total = protocol_fee_bps
+        .checked_add(platform_fee_bps)
+        .and_then(|s| s.checked_add(arbitration_fee_bps))
+        .and_then(|s| s.checked_add(resolver_fee_bps))
+        .ok_or(ContractError::FeeCalculationOverflow)?;
+    if total > crate::MAX_TOTAL_FEE_BPS {
         return Err(ContractError::FeeExceedsMax);
     }
     Ok(())
@@ -578,6 +607,13 @@ pub(crate) fn update_arbitration_fee(
     let mut config = read_fee_config(env);
     // Validate that new arbitration fee + existing protocol fee doesn't exceed combined cap
     validate_combined_fees(config.protocol_fee_bps, fee_bps)?;
+    let global_config = read_global_config(env);
+    validate_total_fee_bps(
+        config.protocol_fee_bps,
+        global_config.platform_fee_bps,
+        fee_bps,
+        0,
+    )?;
     let old_fee = config.arbitration_fee_bps;
     config.arbitration_fee_bps = fee_bps;
     write_fee_config(env, &config);
@@ -1258,7 +1294,7 @@ pub(crate) fn settle_escrow_to_payees(
     escrow_id: u64,
     fee_bps: u32,
 ) -> Result<(EscrowState, Address), ContractError> {
-    let fee_collector: Address = crate::storage::read_global_config(env)
+    let _fee_collector: Address = crate::storage::read_global_config(env)
         .fee_collector
         .ok_or(ContractError::NotInitialized)?;
 
@@ -1290,7 +1326,7 @@ pub(crate) fn settle_escrow_to_payees(
     // into `cancel_escrow`, `raise_dispute`, or `auto_release` therefore sees a
     // terminal `Completed` escrow and is rejected.
     if protocol_fee > 0 {
-        payout(env, &escrow.token, &fee_collector, protocol_fee);
+        crate::storage::add_accumulated_fee(env, &escrow.token, protocol_fee)?;
     }
     distribute_to_payees(env, &escrow.token, &escrow.payees, net_amount)?;
     payout_basket_tokens(env, escrow_id, &first_payee_addr, Some(fee_bps))?;
@@ -1575,6 +1611,12 @@ pub(crate) fn create_escrow_internal(
 
     validate_escrow_fee_bps(fee_bps)?;
     validate_resolver_fee_bps(resolver_fee_bps)?;
+    validate_total_fee_bps(
+        fee_bps,
+        global_config.platform_fee_bps,
+        global_config.arbitration_fee_bps,
+        resolver_fee_bps,
+    )?;
     validate_payees(env, &payees)?;
 
     // Validate notes length
@@ -1807,4 +1849,84 @@ pub(crate) fn escrow_created_at(env: &Env, escrow_id: u64) -> u64 {
     load_state_history(env, escrow_id)
         .get(0)
         .map_or(0, |(_, ts)| ts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{BoundedPayees, Payee};
+    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+
+    #[test]
+    fn validate_payees_rejects_zero_bps_and_non_monotonic_sum() {
+        let env = Env::default();
+        let p1 = Address::generate(&env);
+        let p2 = Address::generate(&env);
+
+        let mut list = Vec::new(&env);
+        list.push_back(Payee {
+            address: p1.clone(),
+            bps: 10_000,
+        });
+        list.push_back(Payee {
+            address: p2.clone(),
+            bps: 0,
+        });
+        assert_eq!(
+            validate_payees(&env, &BoundedPayees { inner: list }),
+            Err(ContractError::PayeeBpsMismatch)
+        );
+    }
+
+    #[test]
+    fn validate_payees_rejects_overflow() {
+        let env = Env::default();
+        let p1 = Address::generate(&env);
+        let p2 = Address::generate(&env);
+
+        let mut list = Vec::new(&env);
+        list.push_back(Payee {
+            address: p1,
+            bps: 5_000,
+        });
+        list.push_back(Payee {
+            address: p2,
+            bps: u32::MAX,
+        });
+        assert_eq!(
+            validate_payees(&env, &BoundedPayees { inner: list }),
+            Err(ContractError::ArithmeticError)
+        );
+    }
+
+    #[test]
+    fn validate_payees_accepts_strictly_monotonic_10000() {
+        let env = Env::default();
+        let p1 = Address::generate(&env);
+        let p2 = Address::generate(&env);
+
+        let mut list = Vec::new(&env);
+        list.push_back(Payee {
+            address: p1,
+            bps: 6_000,
+        });
+        list.push_back(Payee {
+            address: p2,
+            bps: 4_000,
+        });
+        assert_eq!(validate_payees(&env, &BoundedPayees { inner: list }), Ok(()));
+    }
+
+    #[test]
+    fn validate_total_fee_bps_enforces_global_cap() {
+        assert_eq!(validate_total_fee_bps(1_000, 500, 500, 500), Ok(()));
+        assert_eq!(
+            validate_total_fee_bps(1_000, 501, 500, 500),
+            Err(ContractError::FeeExceedsMax)
+        );
+        assert_eq!(
+            validate_total_fee_bps(u32::MAX, 1, 0, 0),
+            Err(ContractError::FeeCalculationOverflow)
+        );
+    }
 }

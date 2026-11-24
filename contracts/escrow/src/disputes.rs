@@ -422,12 +422,16 @@ impl Escrow {
         // Net payout: the principal minus the provisional arbitration and
         // resolver fees (`escrow.amount` is already net of them), minus the
         // platform and protocol fees settled here.
+        let total_fees = platform_fee
+            .checked_add(protocol_fee)
+            .ok_or(ContractError::FeeCalculationOverflow)?;
+        if total_fees > escrow.amount {
+            return Err(ContractError::InsufficientBalance);
+        }
         let payout_amount = escrow
             .amount
-            .checked_sub(platform_fee)
-            .ok_or(ContractError::ArithmeticError)?
-            .checked_sub(protocol_fee)
-            .ok_or(ContractError::ArithmeticError)?;
+            .checked_sub(total_fees)
+            .ok_or(ContractError::InsufficientBalance)?;
 
         // ── EFFECTS (state mutations) — must precede all external calls (CEI) ──
         let new_state = match resolution {
@@ -452,6 +456,10 @@ impl Escrow {
                     .checked_add(arbitration_fee)
                     .ok_or(ContractError::ArithmeticError)?,
             );
+        }
+
+        if protocol_fee > 0 {
+            crate::storage::add_accumulated_fee(&env, &escrow.token, protocol_fee)?;
         }
 
         match resolution {
@@ -510,7 +518,6 @@ impl Escrow {
                     crate::helpers::payout::split_net(payout_amount, *split_bps)?;
                 payout(&env, &escrow.token, &recipient, payee_net);
                 payout(&env, &escrow.token, buyer, buyer_net);
-                payout(&env, &escrow.token, &fee_collector, protocol_fee);
                 crate::internal::payout_basket_tokens_split(
                     &env,
                     escrow_id,
@@ -522,7 +529,6 @@ impl Escrow {
             }
             _ => {
                 payout(&env, &escrow.token, &recipient, payout_amount);
-                payout(&env, &escrow.token, &fee_collector, protocol_fee);
                 payout_basket_tokens(&env, escrow_id, &recipient, Some(escrow.fee_bps))?;
             }
         }
@@ -768,12 +774,16 @@ impl Escrow {
         } else {
             0
         };
+        let total_fees = protocol_fee
+            .checked_add(platform_fee)
+            .ok_or(ContractError::FeeCalculationOverflow)?;
+        if total_fees > escrow.amount {
+            return Err(ContractError::InsufficientBalance);
+        }
         let payout_amount = escrow
             .amount
-            .checked_sub(protocol_fee)
-            .ok_or(ContractError::AmountCalculationOverflow)?
-            .checked_sub(platform_fee)
-            .ok_or(ContractError::AmountCalculationOverflow)?;
+            .checked_sub(total_fees)
+            .ok_or(ContractError::InsufficientBalance)?;
         let fee_collector = if protocol_fee > 0 {
             fee_config.fee_collector.clone()
         } else {
@@ -800,13 +810,14 @@ impl Escrow {
         save_dispute(&env, escrow_id, &dispute_data);
         record_escrow_refunded(&env, escrow_id)?;
 
+        if protocol_fee > 0 {
+            crate::storage::add_accumulated_fee(&env, &escrow.token, protocol_fee)?;
+        }
+
         if let Some(treasury) = treasury {
             payout(&env, &escrow.token, &treasury, platform_fee);
         }
         payout(&env, &escrow.token, &buyer, payout_amount);
-        if let Some(fee_collector) = fee_collector {
-            payout(&env, &escrow.token, &fee_collector, protocol_fee);
-        }
         // Secondary basket tokens are refunded gross, matching the existing
         // refund paths and ensuring no dormant resolver receives them.
         payout_basket_tokens(&env, escrow_id, &buyer, None)?;
