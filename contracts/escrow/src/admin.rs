@@ -12,8 +12,9 @@ use crate::storage;
 use crate::{
     emit_appeal_fee_updated, emit_fee_collector_accepted, emit_fee_collector_pending,
     emit_max_appeals_updated, emit_max_basket_size_updated, emit_recovery_mode_updated,
-    emit_recovery_withdraw, emit_timelock_cancelled, emit_timelock_executed, emit_timelock_queued,
-    ContractError, Escrow, EscrowState, TimelockOperation, TimelockProposal, *,
+    emit_recovery_withdraw, emit_timelock_admin_mismatch, emit_timelock_cancelled,
+    emit_timelock_executed, emit_timelock_queued, ContractError, Escrow, EscrowState,
+    TimelockOperation, TimelockProposal, *,
 };
 use soroban_sdk::{
     contractimpl, xdr::ToXdr, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Val, Vec,
@@ -103,6 +104,10 @@ fn queue_timelock_op_with_min_delay(
         ready_at,
     };
 
+    // A newly authorized proposal replaces any prior rotation invalidation.
+    env.storage()
+        .instance()
+        .remove(&DataKey::InvalidatedTimelockOp(operation as u32));
     storage::write_timelock_proposal(env, operation as u32, &proposal);
     emit_timelock_queued(env, operation as u32, caller.clone(), now, ready_at);
     Ok(())
@@ -110,25 +115,8 @@ fn queue_timelock_op_with_min_delay(
 
 /// Finalizes a queued timelock proposal once its delay has elapsed.
 ///
-/// **Execution is permissionless (keeper execution, #1235).** Any address may
-/// execute a mature proposal — the admin who queued it, a keeper bot, a cron
-/// job — as long as:
-///
-/// 1. a proposal is queued for `operation` (else `InvalidState`);
-/// 2. `now >= proposal.ready_at` (else `TimelockNotElapsed`);
-/// 3. `proposal.proposer` is still the **current** admin (else
-///    `NotAuthorized`). A proposal queued by an admin who has since been
-///    rotated out is orphaned and can never execute; the new admin must
-///    cancel it and queue their own;
-/// 4. the supplied parameters hash to `proposal.params_hash` under
-///    [`compute_proposal_hash`] (else `InvalidProposalHash`).
-///
-/// The admin's authorization was captured when the proposal was queued, so
-/// execution needs no admin signature. `caller` is the *executor*: it must
-/// authorize the call (`require_auth`) so the `executor` recorded in the
-/// `TimelockExecuted` event is authenticated rather than an arbitrary value.
-/// Audit consumers can tell admin-driven from keeper-driven executions by
-/// comparing the event's `executor` with its `proposer`.
+/// Execution requires the executor's authorization, not the proposer's: any
+/// keeper may execute a mature proposal queued by the current admin.
 fn execute_timelock_op(
     env: &Env,
     caller: &Address,
@@ -136,22 +124,25 @@ fn execute_timelock_op(
     params: Vec<Val>,
 ) -> Result<TimelockProposal, ContractError> {
     caller.require_auth();
-
-    let proposal = storage::read_timelock_proposal(env, operation as u32)
-        .ok_or(ContractError::InvalidState)?;
+    let current_admin = storage::read_admin_address(env).ok_or(ContractError::NotInitialized)?;
+    let proposal = match storage::read_timelock_proposal(env, operation as u32) {
+        Some(proposal) => proposal,
+        None if env
+            .storage()
+            .instance()
+            .has(&DataKey::InvalidatedTimelockOp(operation as u32)) =>
+        {
+            return Err(ContractError::NotAuthorized);
+        }
+        None => return Err(ContractError::InvalidState),
+    };
+    if proposal.proposer != current_admin {
+        return Err(ContractError::NotAuthorized);
+    }
 
     let now = env.ledger().timestamp();
     if now < proposal.ready_at {
         return Err(ContractError::TimelockNotElapsed);
-    }
-
-    // The proposal must have been queued by the admin currently in office.
-    // This replaces the old `caller == proposer` value check (#975): who
-    // submits the transaction no longer matters, but a proposal from a
-    // rotated-out admin must not execute.
-    let admin = require_admin(env)?;
-    if proposal.proposer != admin {
-        return Err(ContractError::NotAuthorized);
     }
 
     if compute_proposal_hash(env, operation, &params) != proposal.params_hash {
@@ -167,6 +158,29 @@ fn execute_timelock_op(
         params, // Emit the actual params, not the hash
     );
     Ok(proposal)
+}
+
+/// Cancel all outstanding proposals when the admin changes. A rejected
+/// execution cannot do this itself: Soroban rolls back state and events on error.
+fn invalidate_timelocks_on_rotation(env: &Env) {
+    // TimelockOperation discriminants are append-only; update the upper bound
+    // when a new operation is added.
+    for operation in 1..=(TimelockOperation::SetTimelockDelay as u32) {
+        if let Some(proposal) = storage::read_timelock_proposal(env, operation) {
+            storage::remove_timelock_proposal(env, operation);
+            env.storage()
+                .instance()
+                .set(&DataKey::InvalidatedTimelockOp(operation), &true);
+            // Cancellation is automatic, not an action signed by the new admin.
+            emit_timelock_cancelled(
+                env,
+                operation,
+                proposal.proposer.clone(),
+                env.current_contract_address(),
+            );
+            emit_timelock_admin_mismatch(env, operation, proposal.proposer);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -976,6 +990,7 @@ impl Escrow {
         if new_admin == old_admin {
             return Err(ContractError::SameAddress);
         }
+        invalidate_timelocks_on_rotation(&env);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         emit_admin_rotated(&env, old_admin, new_admin);
         Ok(())
@@ -1751,6 +1766,7 @@ impl Escrow {
         if new_admin == old_admin {
             return Err(ContractError::SameAddress);
         }
+        invalidate_timelocks_on_rotation(&env);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         emit_admin_rotated(&env, old_admin, new_admin);
         Ok(())
