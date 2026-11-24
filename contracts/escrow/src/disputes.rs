@@ -495,7 +495,13 @@ impl Escrow {
         }
 
         if let Some(ref treasury_addr) = treasury {
-            payout(&env, &escrow.token, treasury_addr, platform_fee);
+            crate::helpers::payout::payout_platform_fee(
+                &env,
+                escrow_id,
+                &escrow.token,
+                treasury_addr,
+                platform_fee,
+            );
         }
         match (&resolution, &buyer_split) {
             (ResolutionType::Split(split_bps), Some(buyer)) => {
