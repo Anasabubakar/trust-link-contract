@@ -203,7 +203,7 @@ fn appeal_fails_after_finalization_completed() {
 
     // Appeal is no longer possible once finalization has completed.
     let res = client.try_appeal_dispute(&setup.buyer, &setup.escrow_id);
-    assert_eq!(res, Err(Ok(ContractError::NotPendingFinalization)));
+    assert_eq!(res, Err(Ok(ContractError::EscrowAlreadyCompleted)));
     assert_eq!(
         client.get_dispute(&setup.escrow_id).unwrap().status,
         DisputeStatus::Resolved,
@@ -519,6 +519,8 @@ fn resolve_appeal_reresolve_with_new_resolver_defers_and_pays_final_resolver() {
     assert_eq!(token_client.balance(&setup.seller), 1_000 - 50 - 20);
     assert_eq!(token_client.balance(&setup.contract_id), 0);
     assert!(client.get_dispute(&setup.escrow_id).unwrap().fees_charged);
+}
+
 // ── Dispute / appeal counter invariants ─────────────────────────────────────
 
 #[test]

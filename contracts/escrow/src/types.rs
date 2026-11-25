@@ -769,7 +769,8 @@ pub struct UpgradeRecord {
     pub upgraded_by: Address,
     /// Contract version counter after the upgrade (monotonically increasing).
     pub version: u32,
-}/// Maximum number of payees per escrow. Enforced by [`BoundedPayees`] so
+}
+/// Maximum number of payees per escrow. Enforced by [`BoundedPayees`] so
 /// storage cost is bounded at creation time and the length-prefix overhead of
 /// an unbounded `Vec` is eliminated.
 pub const MAX_PAYEES: u32 = 10;

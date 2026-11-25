@@ -138,8 +138,13 @@ mod tests {
             "seller should receive amount minus snapshotted 1% fee, not live 3% fee"
         );
         assert_eq!(
-            fee_collector_balance, expected_fee,
-            "fee collector should receive snapshotted 1% fee"
+            fee_collector_balance, 0,
+            "protocol fee is accumulated, not paid out immediately"
+        );
+        assert_eq!(
+            tc.balance(&client.address),
+            expected_fee,
+            "contract holds the snapshotted 1% accumulated fee"
         );
     }
 
@@ -212,8 +217,13 @@ mod tests {
             "auto_release should use live protocol fee"
         );
         assert_eq!(
-            fee_collector_balance, expected_fee,
-            "fee collector should receive live protocol fee on auto_release"
+            fee_collector_balance, 0,
+            "protocol fee is accumulated, not paid out immediately"
+        );
+        assert_eq!(
+            tc.balance(&client.address),
+            expected_fee,
+            "contract holds the live protocol fee on auto_release"
         );
     }
 

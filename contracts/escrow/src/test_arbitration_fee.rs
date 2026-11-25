@@ -92,9 +92,11 @@ fn test_arbitration_fee_deduction_on_resolve_release() {
 
     assert_eq!(balance(&env, &token, &seller), 930);
 
-    // arbitration fee (50) and protocol fee (20) go to fee_collector
-    assert_eq!(balance(&env, &token, &contract_id), 0);
-    assert_eq!(balance(&env, &token, &fee_collector), 70);
+    // Arbitration fee (50) is paid to the fee collector; the protocol fee (20)
+    // is credited to the accumulated-fee ledger and stays in the contract.
+    assert_eq!(balance(&env, &token, &contract_id), 20);
+    assert_eq!(balance(&env, &token, &fee_collector), 50);
+    assert_eq!(client.get_accumulated_fees(&token), 20);
 
     // Dedicated tracking variable should be updated
     assert_eq!(client.get_total_arbitration_fees(&token), 50);
@@ -158,8 +160,9 @@ fn test_arbitration_fee_deduction_on_resolve_refund() {
     // 4. buyer refund = 1000 - 50 - 30 = 920
 
     assert_eq!(balance(&env, &token, &buyer), 920);
-    assert_eq!(balance(&env, &token, &contract_id), 0);
-    assert_eq!(balance(&env, &token, &fee_collector), 80);
+    assert_eq!(balance(&env, &token, &contract_id), 30);
+    assert_eq!(balance(&env, &token, &fee_collector), 50);
+    assert_eq!(client.get_accumulated_fees(&token), 30);
     assert_eq!(client.get_total_arbitration_fees(&token), 50);
 }
 
@@ -569,6 +572,8 @@ fn test_execute_resolution_transition_rejects_fees_exceeding_amount() {
             ResolutionType::Release,
             votes,
             true,
+            None,
+            soroban_sdk::Bytes::new(&env),
         );
 
         let escrow_after = crate::internal::load_escrow(&env, id).unwrap();
