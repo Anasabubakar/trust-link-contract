@@ -152,7 +152,7 @@ fn rotation_purges_all_queued_timelock_proposals() {
     assert_eq!(cancellations.len(), 2);
     for cancellation in cancellations.iter() {
         assert_eq!(cancellation.proposer, admin);
-        assert_eq!(cancellation.canceller, client.address);
+        assert_eq!(cancellation.canceller, new_admin);
     }
 }
 
@@ -176,7 +176,7 @@ fn execute_set_admin_purges_queued_proposals() {
     assert_eq!(cancellations.len(), 2);
     for cancellation in cancellations.iter() {
         assert_eq!(cancellation.proposer, admin);
-        assert_eq!(cancellation.canceller, client.address);
+        assert_eq!(cancellation.canceller, new_admin);
     }
 
     // Previously queued changes can no longer be executed by anyone.

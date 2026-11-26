@@ -73,8 +73,9 @@ fn test_sep41_fund_and_confirm_delivery() {
     env.ledger().set_timestamp(escrow.dispute_deadline() + 1);
     client.confirm_delivery(&buyer, &id, &false);
 
-    // 1% fee on 500 = 5 accrued in the contract; 495 to seller
+    // 1% fee on 500 = 5 accrued for pull-claim; 495 to seller
     assert_eq!(balance(&env, &token, &seller), 495);
+    assert_eq!(client.get_accumulated_fees(&token), 5);
     assert_eq!(balance(&env, &token, &fee_collector), 0);
     assert_eq!(balance(&env, &token, &contract_id), 5);
     assert_eq!(client.get_escrow(&id).state, EscrowState::Completed);
@@ -329,6 +330,7 @@ fn test_sep41_dispute_and_release() {
     assert_eq!(balance(&env, &token, &seller), 985);
     assert_eq!(balance(&env, &token, &buyer), 0);
     assert_eq!(balance(&env, &token, &fee_collector), 5);
+    assert_eq!(client.get_accumulated_fees(&token), 10);
     assert_eq!(balance(&env, &token, &contract_id), 10);
     assert_eq!(client.get_escrow(&id).state, EscrowState::Completed);
 
@@ -388,6 +390,7 @@ fn test_sep41_auto_release_with_fees() {
     // fee = 1000 * 100 / 10000 = 10
     // net = 1000 - 10 = 990
     assert_eq!(balance(&env, &token, &seller), 990);
+    assert_eq!(client.get_accumulated_fees(&token), 10);
     assert_eq!(balance(&env, &token, &fee_collector), 0);
     assert_eq!(balance(&env, &token, &contract_id), 10);
     assert_eq!(client.get_escrow(&id).state, EscrowState::Completed);

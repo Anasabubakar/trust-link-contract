@@ -441,7 +441,7 @@ settled twice. ∎
 | `confirm_delivery` | `A` | `floor(A*f/10_000)`, `f` = snapshotted `escrow.fee_bps` | `0` on the primary; secondary basket tokens pay `floor(M_j*q/10_000)` | none | `net = A - P` split across all payees | `Σ p_i + P = A`; for each secondary entry `net_j + P_j + F_j = M_j` |
 | `auto_release` | `A` | `floor(A*f/10_000)`, `f` = live global `protocol_fee_bps` | same as `confirm_delivery` | none | same as `confirm_delivery` | `Σ p_i + P = A`; secondary entries as above |
 | `co_signed_release` | `A` | `floor(A*f/10_000)`, live global rate | `0` on the primary; secondary basket tokens pay protocol + platform | none | entire `net` to the primary payee | `net + P = A`; secondary entries as above |
-| `finalize_dispute` (Release / Refund) | `B = A` | `floor(B*f/10_000)` | `floor(B*q/10_000)` when `q > 0` | `a` to fee collector, `r` split among `k` winning resolvers | `payout = A' - P - F` to the payee (Release) or buyer (Refund) | `payout + P + F + a + r = A` |
+| `finalize_dispute` (Release / Refund) | `B = A` | `floor(B*f/10_000)` | `floor(B*q/10_000)` when a treasury exists | `a` to fee collector, `r` split among `k` winning resolvers | `payout = A' - P - F` to the payee (Release) or buyer (Refund) | `payout + P + F + a + r = A` |
 | `finalize_dispute` (`Split(s)`) | `B = A` | same | same | same | `payee_net = floor(payout*s/10_000)`, `buyer_net = payout - payee_net` | `payee_net + buyer_net + P + F + a + r = A` |
 | `claim_dispute_timeout` | `A` | `floor(A*f/10_000)` | `floor(A*q/10_000)` only when a treasury exists | none (`a = r = 0`) | `payout = A - P - F` to buyer; secondary basket tokens gross | `payout + P + F = A` |
 | `cancel_escrow` (Funded), `mutual_cancel`, `emergency_drain`, `reclaim_expired` | `A` | `0` | `0` | none | full `A` to buyer; all secondary basket entries gross | `refund + Σ M_j = A + Σ M_j` |
@@ -516,7 +516,7 @@ At finalization:
 
 1. `B = A' + a + r = A` exactly, so the fee basis is the original funded
    principal, not the reduced remainder.
-2. `P = floor(B*f/10_000)` and `F = floor(B*q/10_000)` (zero when `q = 0`).
+2. `P = floor(B*f/10_000)` and `F = floor(B*q/10_000)` when a treasury exists, and `F = 0` otherwise.
    Both fees are computed independently on the same gross basis; there is no
    compounding on a shrinking base.
 3. `T = P + F`; if `T > A'` the call reverts with `InsufficientBalance`, so
